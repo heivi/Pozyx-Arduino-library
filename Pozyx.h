@@ -16,9 +16,6 @@
 
 #define BUFFER_LENGTH 64
 
-#undef NULL
-#define NULL 0
-
 #define RPI
 #undef LINUX
 
@@ -56,7 +53,7 @@ typedef float float32_t;
 /** 
 * The UWB settings type defines all attributes needed to set the UWB (communication) parameters
 */
-typedef struct __attribute__((packed))_UWB_settings {    
+typedef struct _UWB_settings {    
     /** The UWB channel number. Possible values are 1, 2, 3, 4, 5, 7. See the reg:POZYX_UWB_CHANNEL register for more information. */
     uint8_t channel;  
     /** The bitrate. Possible values are 
@@ -66,14 +63,14 @@ typedef struct __attribute__((packed))_UWB_settings {
     * - 2: 6.8Mbits/s. 
     *
     * See the reg:POZYX_UWB_RATES register for more information */              
-    unsigned bitrate:6; 
+    uint8_t bitrate; 
     /** The UWB pulse repetition frequency (PRF). Possible values are 
     * 
     * - 1: 16MHz
     * - 2: 64MHz 
     *
     * See the reg:POZYX_UWB_RATES register for more information */                    
-    unsigned prf:2;                 
+    uint8_t prf;                 
     /** The preabmle length. Possible values are:
     *
     * - 0x0C : 4096 symbols.
@@ -234,13 +231,14 @@ typedef struct __attribute__((packed))_device_range {
 */
 class PozyxClass
 {
-private:
+protected:
     static int _mode;               // the mode of operation, can be MODE_INTERRUPT or MODE_POLLING
     static int _interrupt;          // variable to indicate that an interrupt has occured
 
 
     static int _hw_version;         // Pozyx harware version 
-    static int _sw_version;         // Pozyx software (firmware) version. (By updating the firmware on the Pozyx device, this value can change)
+    static int _fw_version;         // Pozyx software (firmware) version. (By updating the firmware on the Pozyx device, this value can change)
+   
 
     static int i2c_file;
     static int gpio_file;
@@ -298,10 +296,12 @@ private:
     * @retval #true event occured.
     * @retval #false event did not occur, this function timed out.
     */
-    static bool waitForFlag_safe(uint8_t interrupt_flag, int timeout_ms, uint8_t *interrupt = NULL);
+    
    
 
 public:
+
+    static bool waitForFlag_safe(uint8_t interrupt_flag, int timeout_ms, uint8_t *interrupt = 0);
 
     /** \addtogroup core 
      *  @{
@@ -375,7 +375,7 @@ public:
     * @retval #POZYX_SUCCESS success.
     * @retval #POZYX_FAIL function failed.
     */
-    static int regFunction(uint8_t reg_address, uint8_t *params, int param_size, uint8_t *pData, int size);
+    static int regFunction(uint8_t reg_address, uint8_t *params=0, int param_size=0, uint8_t *pData=0, int size=0);
 
     /**
     * Write to the registers on a remote Pozyx device (anchor or tag).
@@ -418,7 +418,7 @@ public:
     * @retval #POZYX_FAIL function failed.
     * @retval #POZYX_TIMEOUT function timed out, no response received.
     */
-    static int remoteRegFunction(uint16_t destination, uint8_t reg_address, uint8_t *params, int param_size, uint8_t *pData, int size);
+    static int remoteRegFunction(uint16_t destination, uint8_t reg_address, uint8_t *params=0, int param_size=0, uint8_t *pData=0, int size=0);
 
 /** @}*/ 
 
@@ -758,9 +758,11 @@ public:
     /**
     * Trigger a software reset of the Pozyx device.
     * Function that will trigger the reset of the system. 
-    * This will reset all configuration values to the default values
+    * This will reload all configurations from flash memory, or to their default values.
     *
     *   @param remote_id: optional parameter that determines the remote device to be used.
+    *
+    * @see clearConfiguration, saveConfiguration
     */
     static void resetSystem(uint16_t remote_id = 0);
 
@@ -877,6 +879,77 @@ public:
     */
     static int setLedConfig(uint8_t config = 0x0, uint16_t remote_id = 0);
 
+        /**
+     * Configure the interrupt pin.
+     * 
+     * @param  pin          pin id on the pozyx device, can be 1,2,3,4 (or 5 or 6 on the pozyx tag)
+     * @param  mode         push-pull or pull-mode
+     * @param  bActiveHigh  is the interrupt active level HIGH (i.e. 3.3V)
+     * @param  bLatch       should the interrupt be a short pulse or should it latch until the interrupt status register is read
+     *
+     * @retval #POZYX_SUCCESS success.
+     * @retval #POZYX_FAIL function failed.   
+     */
+    static int configInterruptPin(int pin, int mode, int bActiveHigh, int bLatch, uint16_t remote_id=0);
+
+    /**
+    * Save (part of) the configuration to Flash memory.
+    * @version Requires firmware version v1.0
+    *
+    * This functions stores (parts of) the configurable Pozyx settings in the non-volatile flash memory of the Pozyx device.
+    * This function will save the current settings and on the next startup of the Pozyx device these saved settings will be loaded automatically.
+    * settings from the flash memory. All registers that are writable, the anchor ids for positioning and the device list (which contains the anchor coordinates) can be saved.
+    *
+    *   @param type this specifies what should be saved. Possible options are #POZYX_FLASH_REGS, #POZYX_FLASH_ANCHOR_IDS or #POZYX_FLASH_NETWORK.
+    *   @param registers an option array that holds all the register addresses for which the value must be saved. All registers that are writable are allowed.
+    *   @param num_registers optional parameter that determines the length of the registers array.
+    *   @param remote_id optional parameter that determines the remote device to be used.
+    *
+    * @retval #POZYX_SUCCESS success.
+    * @retval #POZYX_FAIL function failed.
+    *
+    * @see clearConfiguration
+    */
+    static int saveConfiguration(int type, uint8_t registers[] = 0, int num_registers = 0, uint16_t remote_id = 0);
+
+    /**
+    * Clears the configuration.
+    * @version Requires firmware version v1.0
+    *
+    * This function clears (part of) the configuration that was previously stored in the non-volatile Flash memory.
+    * The next startup of the Pozyx device will load the default configuration values for the registers, anchor_ids and network list.
+    *
+    *   @param remote_id optional parameter that determines the remote device to be used.
+    *
+    * @retval #POZYX_SUCCESS success.
+    * @retval #POZYX_FAIL function failed.
+    *
+    * @see saveConfiguration
+    */
+    static int clearConfiguration(uint16_t remote_id = 0);
+
+    /**
+     * Verify if a register content is saved in the flash memory.
+     * @version Requires firmware version v1.0
+     *
+     * This function verifies if a given register variable, specified by its address, is saved in flash memory.
+     * @param  regAddress the register address to check
+     * @param  remote_id optional parameter that determines the remote device to be used.
+     * 
+     * @retval true(1) if the register variable is saved
+     * @retval false(0) if the register variable is not saved
+     */
+    static bool isRegisterSaved(uint8_t regAddress, uint16_t remote_id = 0);
+
+    /**
+     * Return the number of register variables saved in flash memory.
+     * 
+     * @param  remote_id optional parameter that determines the remote device to be used.
+     * 
+     * @return           the number of register variables saved in flash memory.
+     */
+    static int getNumRegistersSaved(uint16_t remote_id = 0);
+
 /** @}*/
 
     
@@ -947,7 +1020,7 @@ public:
     * @see setSelectionOfAnchors, getPositioningAnchorIds
     */
     static int setPositioningAnchorIds(uint16_t anchors[], int anchor_num, uint16_t remote_id = 0);
-
+    
     /**
     * Obtain which anchors used for positioning.
     * Function to retrieve the anchors that used for positioning by calling the register function reg:POZYX_POS_GET_ANCHOR_IDS. 
@@ -1506,7 +1579,7 @@ public:
     *
     * @see Please read the Ready to Localize tutorial to get started with this function.
     */
-    static int doAnchorCalibration(int dimension = POZYX_2D, int num_measurements = 10, int num_anchors = 0, uint16_t anchors[] = 0,  int32_t heights[] = NULL);
+    static int doAnchorCalibration(int dimension = POZYX_2D, int num_measurements = 10, int num_anchors = 0, uint16_t anchors[] = 0,  int32_t heights[] = 0);
         
     /**
     * Empty the internal list of devices.

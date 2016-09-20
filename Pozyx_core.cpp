@@ -46,11 +46,11 @@ extern "C" {
 //#define DEBUG
 #define PRINTERRORS
 
-int PozyxClass::_interrupt = 0;
+int PozyxClass::_interrupt;
 int PozyxClass::_mode;
 
 int PozyxClass::_hw_version;       // pozyx harware version 
-int PozyxClass::_sw_version;       // pozyx software (firmware) version. (By updating the firmware on the pozyx device, this value can change);
+int PozyxClass::_fw_version;       // pozyx firmware version. (By updating the firmware on the pozyx device, this value can change);
 
 int PozyxClass::i2c_file;
 int PozyxClass::gpio_file;
@@ -231,13 +231,16 @@ int PozyxClass::begin(int adapter, bool print_result, int mode, int interrupts, 
     return POZYX_FAILURE;
   }  
   whoami = regs[0];
-  _sw_version = regs[1];
+  _fw_version = regs[1];
   _hw_version = regs[2]; 
 
   if(print_result){
     std::cout << "WhoAmI: 0x" << std::hex << (int)whoami << std::endl;
-    std::cout << "SW ver.: " << std::dec << (int)_sw_version << std::endl;
-    std::cout << "HW ver.: " << (int)_hw_version << std::endl;
+    std::cout << "FW ver.: v" << std::dec << (int)((_fw_version&0xF0)>>4) << "." << (int)(_fw_version&0x0F);
+	if (_fw_version < 0x10) {
+		std::cout << " (please upgrade)";
+	}
+    std::cout << std::endl << "HW ver.: " << (int)_hw_version << std::endl;
   }
   // verify if the whoami is correct
   if(whoami != 0x43) {    
@@ -255,13 +258,6 @@ int PozyxClass::begin(int adapter, bool print_result, int mode, int interrupts, 
     std::cout << "selftest: 0b" << st << std::endl;
   }
 
-  /*std::bitset<8> typec((int)_hw_version & POZYX_TYPE);
-  std::bitset<8> hwv((int)_hw_version);
-  std::cerr << "hw: 0b" << hwv << std::endl;
-  std::cerr << "typecheck: 0b" << typec << std::endl;
-  std::cerr << "Tag: " << std::dec << POZYX_TAG << std::endl;
-  std::cerr << "Anchor: " << POZYX_ANCHOR << std::endl;*/
-
   if(((int)_hw_version & POZYX_TYPE) == POZYX_TAG)
   {
     // check if the uwb, pressure sensor, accelerometer, magnetometer and gyroscope are working
@@ -276,44 +272,22 @@ int PozyxClass::begin(int adapter, bool print_result, int mode, int interrupts, 
     if(selftest != 0x18) {
       status = POZYX_FAILURE;
     }
-    #ifdef DEBUG
-    printTime();
-    std::cout << "Return from type check" << std::endl;
-    #endif
     return status;
   }
-  
-  // set everything ready for interrupts
-  _interrupt = 0;
+
   if(_mode == MODE_INTERRUPT){
-
-    /*
-    if (gpio_request(GPIO+interrupt_pin, "Pozyx interrupt")) {
-      #ifdef DEBUG
-      std::cerr << "Error interrupting" << std::endl;
-      #endif
-      return POZYX_FAILURE;
-    }
-
-    int irq = 0;
-    if ((irq = gpio_to_irq(GPIO+interrupt_pin)) < 0) {
-      #ifdef DEBUG
-      std::cerr << "Error interrupting" << std::endl;
-      #endif
-      return POZYX_FAILURE;
-    }
-
-    int result = request_irq(irq, IRQ, IRQF_TRIGGER_RISING, "Pozyx interrupt", "Pozyx");
-
-    if (result) {
-      #ifdef DEBUG
-      std::cerr << "Error interrupting" << std::endl;
-      #endif
-      return POZYX_FAILURE;
-    }
-    */
-
-    // export gpio
+    
+    // set the function that must be called upon an interrupt
+    // put your main code here, to run repeatedly:
+#if defined(__SAMD21G18A__) || defined(__ATSAMD21G18A__)
+    // Arduino Tian
+    int tian_interrupt_pin = interrupt_pin;
+    attachInterrupt(interrupt_pin+2, IRQ, RISING);
+#elif defined(__AVR_ATmega328P__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+    // Arduino UNO, Mega
+    attachInterrupt(interrupt_pin, IRQ, RISING);
+#elif defined(LINUX) || defined(RPI)
+	// export gpio
     int fd = open(SYSFS_GPIO_DIR "/export", O_WRONLY);
     if (fd < 0) {
       #ifdef PRINTERRORS
@@ -373,19 +347,19 @@ int PozyxClass::begin(int adapter, bool print_result, int mode, int interrupts, 
       #endif
       return POZYX_FAILURE;
     }
-
-    // set the function that must be called upon an interrupt
-    //attachInterrupt(interrupt_pin, IRQ, RISING);
+#else
+    Serial.println("This is not a board supported by Pozyx, interrupts may not work");
+    attachInterrupt(interrupt_pin, IRQ, RISING);
+#endif
 
     // use interrupt as provided and initiate the interrupt mask
     uint8_t int_mask = interrupts;
-    if (interrupt_pin == 1){
-      int_mask |= POZYX_INT_MASK_PIN;
-    }          
+    configInterruptPin(5+interrupt_pin, PIN_MODE_PUSHPULL, PIN_ACTIVE_LOW, 0);
+
     if (regWrite(POZYX_INT_MASK, &int_mask, 1) == POZYX_FAILURE){
       return POZYX_FAILURE;
     }
-  }  
+  }   
   
   // all done
   delay(POZYX_DELAY_LOCAL_WRITE);
@@ -510,7 +484,23 @@ int PozyxClass::remoteRegWrite(uint16_t destination, uint8_t reg_address, uint8_
   params[0] = (uint8_t)destination;
   params[1] = (uint8_t)(destination>>8);
   params[2] = 0x04;    // flag to indicate a register write  
+
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_TX_SEND, (uint8_t *)&params, 3, NULL, 0);
+
+  if (waitForFlag_safe(POZYX_INT_STATUS_FUNC | POZYX_INT_STATUS_ERR, 100, &int_status)){
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
+    {
+      // An error occured during positioning. 
+      // Please read out the register POZYX_ERRORCODE to obtain more information about the error
+      return POZYX_FAILURE;
+    }else{      
+      return POZYX_SUCCESS;
+    }    
+  }else{
+    return POZYX_TIMEOUT;
+  }
   
   return status;
 }
@@ -543,6 +533,9 @@ int PozyxClass::remoteRegRead(uint16_t destination, uint8_t reg_address, uint8_t
   params[0] = (uint8_t)destination;
   params[1] = (uint8_t)(destination>>8);
   params[2] = 0x02;    // flag to indicate a register read  
+
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_TX_SEND, (uint8_t *)&params, 3, NULL, 0);
   
   // stop if POZYX_TX_SEND returned an error.
@@ -550,21 +543,28 @@ int PozyxClass::remoteRegRead(uint16_t destination, uint8_t reg_address, uint8_t
     return status;
     
   // wait up to x ms to receive a response  
-  if(waitForFlag_safe(POZYX_INT_STATUS_RX_DATA, POZYX_DELAY_INTERRUPT))
+  if(waitForFlag_safe(POZYX_INT_STATUS_FUNC | POZYX_INT_STATUS_ERR, 1000, &int_status))
   {   
-    // we received a response, now get some information about the response
-    uint8_t rx_info[3]= {0,0,0};
-    regRead(POZYX_RX_NETWORK_ID, rx_info, 3);
-    uint16_t remote_network_id = rx_info[0] + ((uint16_t)rx_info[1]<<8);
-    uint8_t data_len = rx_info[2];
-    
-    if( remote_network_id == destination && data_len == size)
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
     {
-      status = readRXBufferData(pData, size);        
-      return status;
-    }else{
-      return POZYX_FAILURE;  
-    }     
+      // An error occured during positioning. 
+      // Please read out the register POZYX_ERRORCODE to obtain more information about the error
+      return POZYX_FAILURE;
+    }else{   
+      // we received a response, now get some information about the response
+      uint8_t rx_info[3]= {0,0,0};
+      regRead(POZYX_RX_NETWORK_ID, rx_info, 3);
+      uint16_t remote_network_id = rx_info[0] + ((uint16_t)rx_info[1]<<8);
+      uint8_t data_len = rx_info[2];
+    
+      if( remote_network_id == destination && data_len == size)
+      {
+        status = readRXBufferData(pData, size);        
+        return status;
+      }else{
+        return POZYX_FAILURE;  
+      } 
+    }    
     
   }else{
     // timeout
@@ -591,46 +591,56 @@ int PozyxClass::remoteRegFunction(uint16_t destination, uint8_t reg_address, uin
   
   // stop if POZYX_TX_DATA returned an error.
   if(status == POZYX_FAILURE)
+  {
     return status;
+  }
   
   // send the packet
   uint8_t tx_params[3];
   tx_params[0] = (uint8_t)destination;
   tx_params[1] = (uint8_t)(destination>>8);
   tx_params[2] = 0x08;    // flag to indicate a register function call  
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_TX_SEND, tx_params, 3, NULL, 0);
   
   // stop if POZYX_TX_SEND returned an error.
-  if(status == POZYX_FAILURE)
+  if(status == POZYX_FAILURE){
     return status;
+  }
     
   // wait up to x ms to receive a response  
-  if(waitForFlag_safe(POZYX_INT_STATUS_RX_DATA, POZYX_DELAY_INTERRUPT))
-  {    
-    // we received a response, now get some information about the response
-    uint8_t rx_info[3];
-    regRead(POZYX_RX_NETWORK_ID, rx_info, 3);
-    uint16_t remote_network_id = rx_info[0] + ((uint16_t)rx_info[1]<<8);
-    uint8_t data_len = rx_info[2];
-            
-    if( remote_network_id == destination && data_len == size+1)
+  if(waitForFlag_safe(POZYX_INT_STATUS_FUNC | POZYX_INT_STATUS_ERR, 1000, &int_status))
+  {   
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
     {
-      uint8_t return_data[size+1];
-  
-      status = readRXBufferData(return_data, size+1);   
-      
-      if(status == POZYX_FAILURE){
-        // debug information
-        // Serial.println("could not read from rx buffer");
-        return status;    
-      }
-  
-      memcpy(pData, return_data+1, size);
+      return POZYX_FAILURE;
+    }else
+    {    
+      // we received a response, now get some information about the response
+      uint8_t rx_info[3];
+      regRead(POZYX_RX_NETWORK_ID, rx_info, 3);
+      uint16_t remote_network_id = rx_info[0] + ((uint16_t)rx_info[1]<<8);
+      uint8_t data_len = rx_info[2];
+              
+      if( remote_network_id == destination && data_len == size+1)
+      {
+        uint8_t return_data[size+1];
+    
+        status = readRXBufferData(return_data, size+1);   
         
-      return return_data[0];
-    }else{
-      return POZYX_FAILURE;  
-    }     
+        if(status == POZYX_FAILURE){
+          // debug information
+          return status;    
+        }
+    
+        memcpy(pData, return_data+1, size);
+          
+        return return_data[0];
+      }else{
+        return POZYX_FAILURE;  
+      } 
+    }      
     
   }else{
     // timeout
