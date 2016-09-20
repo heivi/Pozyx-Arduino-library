@@ -9,6 +9,8 @@ The platform can be selected in Pozyx.h by defining either LINUX or RPI. Used gp
 
 All the examples haven't yet been updated for Linux. Orientation_3D -example should work, building can be done with make.
 
+You can also try my [Pozyx-ROS node](https://github.com/heivi/Pozyx-ROS).
+
 The library requires **firmware version 1.0** installed on the Pozyx devices.
 
 Documentation for the library can be found here:
